@@ -23,6 +23,7 @@ const USER_COLORS = [
 ];
 const NAME_ADJECTIVES = ['Neon', 'Cyber', 'Shadow', 'Ghost', 'Holo', 'Quantum', 'Hyper', 'Stellar'];
 const NAME_NOUNS = ['Tiger', 'Byte', 'Fox', 'Wolf', 'Lynx', 'Pulse', 'Wave', 'Core'];
+const IS_BOLTIC_SERVERLESS = SOCKET_URL.includes('serverless.boltic.app');
 
 function getClientId() {
   const existing = window.sessionStorage.getItem(CLIENT_ID_STORAGE_KEY);
@@ -118,7 +119,8 @@ export default function Pad() {
 
     socket = io(SOCKET_URL, {
       path: '/socket.io',
-      transports: ['polling', 'websocket'],
+      transports: IS_BOLTIC_SERVERLESS ? ['polling'] : ['polling', 'websocket'],
+      upgrade: !IS_BOLTIC_SERVERLESS,
       reconnection: true,
       reconnectionAttempts: Infinity,
       reconnectionDelay: 1000,
