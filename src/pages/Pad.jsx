@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useLayoutEffect, useState, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { io } from 'socket.io-client';
 import { Copy, CheckCircle2, AlertTriangle, Download } from 'lucide-react';
@@ -178,16 +178,29 @@ function cloneOperation(operation) {
   return {
     type: operation.type,
     position: operation.position,
-    text: operation.text
+    text: operation.text,
+    client_id: operation.client_id
   };
 }
 
-function transformInsertAgainstInsert(operation, applied, preferIncoming) {
+function shouldShiftForInsert(applied, incoming) {
+  if (applied.position < incoming.position) {
+    return true;
+  }
+  if (applied.position > incoming.position) {
+    return false;
+  }
+
+  // Tiebreaker: shift the incoming/local op when its client_id is strictly
+  // greater — strict < mirrors the server-side rule exactly.
+  const appliedClientId = applied.client_id || '';
+  const incomingClientId = incoming.client_id || '';
+  return appliedClientId < incomingClientId;
+}
+
+function transformInsertAgainstInsert(operation, applied) {
   const transformed = cloneOperation(operation);
-  if (
-    applied.position < transformed.position ||
-    (!preferIncoming && applied.position === transformed.position)
-  ) {
+  if (shouldShiftForInsert(applied, transformed)) {
     transformed.position += applied.text.length;
   }
   return [transformed];
@@ -286,9 +299,9 @@ function transformDeleteAgainstDelete(operation, applied, allowNoop) {
   }];
 }
 
-function transformOperationAgainst(operation, applied, { allowSplit = false, allowNoop = false, preferIncoming = false } = {}) {
+function transformOperationAgainst(operation, applied, { allowSplit = false, allowNoop = false } = {}) {
   if (operation.type === 'insert' && applied.type === 'insert') {
-    return transformInsertAgainstInsert(operation, applied, preferIncoming);
+    return transformInsertAgainstInsert(operation, applied);
   }
   if (operation.type === 'insert' && applied.type === 'delete') {
     return transformInsertAgainstDelete(operation, applied);
@@ -320,11 +333,15 @@ function transformOperationsAgainstHistory(operations, history, options) {
   return transformedOperations;
 }
 
-function rebaseQueuedOperationsAgainstRemote(queuedOperations, remoteOperation) {
+// Rebase every operation in the queue against a remote operation that has
+// already been transformed to sit "on top of" the queued work.  The
+// transformed remote op is what the server will broadcast; the queue ops
+// must be shifted to account for it.
+function rebaseQueuedOperationsAgainstRemote(queuedOperations, transformedRemoteOperation) {
   const rebasedOperations = [];
 
   for (const operation of queuedOperations) {
-    const transformed = transformOperationAgainst(operation, remoteOperation, {
+    const transformed = transformOperationAgainst(operation, transformedRemoteOperation, {
       allowSplit: false,
       allowNoop: false
     });
@@ -362,10 +379,25 @@ export default function Pad() {
   const versionRef = useRef(0);
   const queuedOperationsRef = useRef([]);
   const inflightCountRef = useRef(0);
+  // Stores the cursor range to restore after the next React DOM commit.
+  // useLayoutEffect reads and clears this synchronously after every render,
+  // which avoids the rAF race with React 18's async rendering.
+  const pendingSelectionRef = useRef(null);
 
   useEffect(() => {
     usersRef.current = users;
   }, [users]);
+
+  // Restore cursor position after every render where a remote op arrived.
+  // Must be useLayoutEffect (not useEffect/rAF) so it runs after React writes
+  // the new textarea value to the DOM but before the browser paints.
+  useLayoutEffect(() => {
+    const pending = pendingSelectionRef.current;
+    if (pending && textareaRef.current) {
+      textareaRef.current.setSelectionRange(pending.start, pending.end);
+      pendingSelectionRef.current = null;
+    }
+  });
 
   const debouncedOperationFlush = useCallback(
     debounce(() => {
@@ -378,10 +410,11 @@ export default function Pad() {
       socket.emit('text_operations', {
         room_id: roomId,
         operations,
-        base_version: versionRef.current
+        base_version: versionRef.current,
+        client_id: clientId
       });
     }, 75),
-    [roomId]
+    [clientId, roomId]
   );
 
   useEffect(() => {
@@ -517,12 +550,19 @@ export default function Pad() {
 
     socket.on('operation_applied', ({ operation, version }) => {
       const queuedOperations = queuedOperationsRef.current.slice();
+      // Transform the remote op past our local queue so we know where it
+      // actually lands in the document the user sees.
       const transformedRemoteOperations = transformOperationsAgainstHistory(
         [operation],
         queuedOperations,
-        { allowSplit: true, allowNoop: true, preferIncoming: true }
+        { allowSplit: true, allowNoop: true }
       );
-      const rebasedQueuedOperations = rebaseQueuedOperationsAgainstRemote(queuedOperations, operation);
+      // The queue must be rebased against the *transformed* remote op
+      // (the one shifted past our local work), not the raw server op.
+      // Using the raw op here was the root cause of position divergence.
+      const rebasedQueuedOperations = transformedRemoteOperations && transformedRemoteOperations.length === 1
+        ? rebaseQueuedOperationsAgainstRemote(queuedOperations, transformedRemoteOperations[0])
+        : null;
 
       if (transformedRemoteOperations == null || rebasedQueuedOperations == null) {
         socket.emit('sync_request', { room_id: roomId });
@@ -536,15 +576,17 @@ export default function Pad() {
       }
 
       const textarea = textareaRef.current;
-      const isFocused = textarea && document.activeElement === textarea;
-      let selection = isFocused
-        ? { start: textarea.selectionStart, end: textarea.selectionEnd }
-        : null;
+      // Always track cursor position — even when the textarea is not actively
+      // focused (e.g. user has switched to another tab/window). Previously we
+      // only restored the cursor when isFocused=true, which meant switching tabs
+      // caused the cursor to snap to end when Tab 2's ops arrived in Tab 1.
+      let selStart = textarea ? textarea.selectionStart : 0;
+      let selEnd   = textarea ? textarea.selectionEnd   : 0;
 
       for (const transformedOperation of transformedRemoteOperations) {
-        if (selection) {
-          selection = adjustSelectionForOperation(selection.start, selection.end, transformedOperation);
-        }
+        const adjusted = adjustSelectionForOperation(selStart, selEnd, transformedOperation);
+        selStart = adjusted.start;
+        selEnd   = adjusted.end;
       }
 
       const nextRenderedContent = applyOperationsToText(nextServerContent, rebasedQueuedOperations);
@@ -559,11 +601,9 @@ export default function Pad() {
       versionRef.current = version;
       setContent(nextRenderedContent);
 
-      if (selection && textarea) {
-        requestAnimationFrame(() => {
-          textarea.setSelectionRange(selection.start, selection.end);
-        });
-      }
+      // Always schedule cursor restore — we track position even when unfocused.
+      pendingSelectionRef.current = { start: selStart, end: selEnd };
+
     });
 
     socket.on('full_sync', ({ content: syncedContent, version, reason }) => {
@@ -575,6 +615,10 @@ export default function Pad() {
       setContent(syncedContent);
       if (reason === 'version_mismatch' || reason === 'operation_conflict') {
         toast('Document resynced to keep everyone in sync.', { icon: '🛠️', duration: 2200 });
+      }
+      // Drain any ops that were buffered while we were out of sync.
+      if (queuedOperationsRef.current.length > 0) {
+        debouncedOperationFlush();
       }
     });
 
@@ -636,7 +680,10 @@ export default function Pad() {
 
   const handleChange = (e) => {
     const val = e.target.value;
-    const operations = deriveOperations(contentRef.current, val);
+    const operations = deriveOperations(contentRef.current, val).map((operation) => ({
+      ...operation,
+      client_id: clientId
+    }));
     if (operations.length === 0) {
       setContent(val);
       contentRef.current = val;
