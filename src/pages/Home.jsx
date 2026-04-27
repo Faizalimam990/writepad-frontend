@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Lock, FileText, ArrowRight } from 'lucide-react';
 import toast from 'react-hot-toast';
+import { API_BASE_URL } from '../lib/config';
 
 export default function Home() {
   const [isSecure, setIsSecure] = useState(false);
@@ -18,7 +19,7 @@ export default function Home() {
     }
 
     try {
-      const res = await fetch('http://localhost:5000/api/rooms', {
+      const res = await fetch(`${API_BASE_URL}/api/rooms`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ is_secure: isSecure, pin })
@@ -39,7 +40,7 @@ export default function Home() {
     if (!joinId) return;
 
     try {
-      const res = await fetch(`http://localhost:5000/api/rooms/${joinId}`);
+      const res = await fetch(`${API_BASE_URL}/api/rooms/${joinId}`);
       if (!res.ok) {
         toast.error('Room not found');
         return;
@@ -47,7 +48,7 @@ export default function Home() {
       const data = await res.json();
       
       if (data.is_secure) {
-        const authRes = await fetch(`http://localhost:5000/api/rooms/${joinId}/validate`, {
+        const authRes = await fetch(`${API_BASE_URL}/api/rooms/${joinId}/validate`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ pin: joinPin })

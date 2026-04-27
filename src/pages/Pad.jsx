@@ -4,6 +4,7 @@ import { io } from 'socket.io-client';
 import { Copy, CheckCircle2, AlertTriangle, Download } from 'lucide-react';
 import debounce from 'lodash.debounce';
 import toast from 'react-hot-toast';
+import { API_BASE_URL, SOCKET_URL } from '../lib/config';
 
 let socket;
 
@@ -17,9 +18,40 @@ export default function Pad() {
   const [typingUsers, setTypingUsers] = useState({});
   const [copied, setCopied] = useState(false);
   const [error, setError] = useState(null);
+  const [requirePin, setRequirePin] = useState(false);
+  const [pinInput, setPinInput] = useState('');
+  const [shouldConnect, setShouldConnect] = useState(false);
 
   useEffect(() => {
-    socket = io('http://localhost:5000');
+    const initPad = async () => {
+      try {
+        const res = await fetch(`${API_BASE_URL}/api/rooms/${roomId}`);
+        if (res.status === 404) {
+          await fetch(`${API_BASE_URL}/api/rooms`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ is_secure: false, pin: '', room_id: roomId })
+          });
+          setShouldConnect(true);
+        } else if (res.ok) {
+          const data = await res.json();
+          if (data.is_secure) {
+            setRequirePin(true);
+          } else {
+            setShouldConnect(true);
+          }
+        }
+      } catch (err) {
+        setError('Failed to connect to the server.');
+      }
+    };
+    initPad();
+  }, [roomId]);
+
+  useEffect(() => {
+    if (!shouldConnect) return;
+
+    socket = io(SOCKET_URL);
 
     socket.on('connect', () => {
       socket.emit('join_pad', { room_id: roomId });
@@ -67,9 +99,9 @@ export default function Pad() {
     });
 
     return () => {
-      socket.disconnect();
+      if (socket) socket.disconnect();
     };
-  }, [roomId, navigate]);
+  }, [roomId, navigate, shouldConnect]);
 
   useEffect(() => {
     const interval = setInterval(() => {
@@ -127,12 +159,55 @@ export default function Pad() {
     toast.success('Downloaded as txt');
   };
 
+  const handlePinSubmit = async (e) => {
+    e.preventDefault();
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/rooms/${roomId}/validate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pin: pinInput })
+      });
+      if (res.ok) {
+        setRequirePin(false);
+        setShouldConnect(true);
+      } else {
+        toast.error('Invalid PIN');
+      }
+    } catch(err) {
+      toast.error('Connection error.');
+    }
+  };
+
   if (error) {
     return (
       <div className="h-screen bg-[#0e1111] flex items-center justify-center">
         <div className="bg-red-500/10 text-red-500 p-8 rounded-2xl flex flex-col items-center">
           <AlertTriangle size={32} className="mb-4" />
           <h2 className="text-xl">{error}</h2>
+        </div>
+      </div>
+    );
+  }
+
+  if (requirePin) {
+    return (
+      <div className="h-screen bg-[#0e1111] flex items-center justify-center p-4">
+        <div className="bg-[#151818] p-8 rounded-2xl border border-gray-800 shadow-2xl w-full max-w-md">
+          <h2 className="text-2xl font-bold mb-6 text-white text-center">Secure Pad</h2>
+          <form onSubmit={handlePinSubmit} className="space-y-4">
+            <input 
+              type="password" 
+              placeholder="Enter PIN" 
+              required
+              autoFocus
+              className="w-full bg-[#1e2323] border border-gray-700 rounded-xl px-4 py-3 outline-none focus:border-purple-500 focus:ring-1 focus:ring-purple-500 transition-all text-white placeholder-gray-500 text-center tracking-widest text-lg"
+              value={pinInput}
+              onChange={e => setPinInput(e.target.value)}
+            />
+            <button type="submit" className="w-full bg-purple-600 hover:bg-purple-500 text-white rounded-xl py-3 px-4 font-medium transition-all">
+              Unlock
+            </button>
+          </form>
         </div>
       </div>
     );
