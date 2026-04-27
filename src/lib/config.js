@@ -1,6 +1,6 @@
 const LOCAL_API_BASE_URL = 'http://localhost:8080';
 const DEPLOYED_API_BASE_URL =
-  'https://writepad-backend-d3d21d98.serverless.boltic.app';
+  'https://writepad-f17dad52.serverless.boltic.app';
 
 const isLocalHost =
   typeof window !== 'undefined' &&

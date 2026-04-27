@@ -71,7 +71,7 @@ export default function Home() {
   };
 
   return (
-    <div className="min-h-screen flex items-center justify-center p-4">
+    <div className="min-h-screen flex items-center justify-center p-4 relative">
       <div className="w-full max-w-4xl grid md:grid-cols-2 gap-8">
         
         <div className="bg-[#151818] p-8 rounded-2xl border border-gray-800 shadow-2xl hover:border-gray-700 transition-colors">
@@ -141,6 +141,9 @@ export default function Home() {
           </form>
         </div>
 
+      </div>
+      <div className="fixed bottom-4 left-1/2 -translate-x-1/2 text-xs tracking-[0.24em] uppercase text-gray-500/80 pointer-events-none">
+        Developed by Faizal Imam
       </div>
     </div>
   )

@@ -75,11 +75,13 @@ export default function Pad() {
   const [mySid, setMySid] = useState('');
   const [typingUsers, setTypingUsers] = useState({});
   const [copied, setCopied] = useState(false);
-  const [error, setError] = useState(null);
+  const [fatalError, setFatalError] = useState(null);
+  const [connectionState, setConnectionState] = useState('connecting');
   const [requirePin, setRequirePin] = useState(false);
   const [pinInput, setPinInput] = useState('');
   const [shouldConnect, setShouldConnect] = useState(false);
   const usersRef = useRef({});
+  const hasShownReconnectToastRef = useRef(false);
 
   useEffect(() => {
     usersRef.current = users;
@@ -105,7 +107,7 @@ export default function Pad() {
           }
         }
       } catch (err) {
-        setError('Failed to connect to the server.');
+        setFatalError('Failed to connect to the server.');
       }
     };
     initPad();
@@ -116,13 +118,17 @@ export default function Pad() {
 
     socket = io(SOCKET_URL, {
       path: '/socket.io',
-      transports: ['websocket', 'polling'],
+      transports: ['polling', 'websocket'],
       reconnection: true,
-      reconnectionAttempts: 5,
+      reconnectionAttempts: Infinity,
+      reconnectionDelay: 1000,
+      reconnectionDelayMax: 5000,
       timeout: 20000
     });
 
     socket.on('connect', () => {
+      setConnectionState('connected');
+      hasShownReconnectToastRef.current = false;
       socket.emit('join_pad', {
         room_id: roomId,
         client_id: clientId,
@@ -132,13 +138,20 @@ export default function Pad() {
     });
 
     socket.on('connect_error', () => {
-      setError('Realtime connection failed. Please refresh and try again.');
-      toast.error('Realtime connection failed.');
+      setConnectionState('reconnecting');
+      if (!hasShownReconnectToastRef.current) {
+        toast('Reconnecting to the room…', { icon: '🔄', duration: 2000 });
+        hasShownReconnectToastRef.current = true;
+      }
     });
 
     socket.on('disconnect', (reason) => {
       if (reason !== 'io client disconnect') {
-        toast.error('Connection lost.');
+        setConnectionState('reconnecting');
+        if (!hasShownReconnectToastRef.current) {
+          toast('Connection lost. Reconnecting…', { icon: '📡', duration: 2200 });
+          hasShownReconnectToastRef.current = true;
+        }
       }
     });
 
@@ -180,8 +193,11 @@ export default function Pad() {
     });
 
     socket.on('error', (err) => {
-      setError(err.message);
-      toast.error(err.message);
+      if (err.message === 'Room not found' || err.message === 'Room is full') {
+        setFatalError(err.message);
+      } else {
+        toast.error(err.message);
+      }
       if (err.message === 'Room not found' || err.message === 'Room is full') {
         setTimeout(() => navigate('/'), 2000);
       }
@@ -277,12 +293,12 @@ export default function Pad() {
     }
   };
 
-  if (error) {
+  if (fatalError) {
     return (
       <div className="h-screen bg-[#0e1111] flex items-center justify-center">
         <div className="bg-red-500/10 text-red-500 p-8 rounded-2xl flex flex-col items-center">
           <AlertTriangle size={32} className="mb-4" />
-          <h2 className="text-xl">{error}</h2>
+          <h2 className="text-xl">{fatalError}</h2>
         </div>
       </div>
     );
@@ -315,10 +331,15 @@ export default function Pad() {
   const activeTyping = Object.keys(typingUsers).filter(sid => sid !== mySid).map(sid => users[sid]?.name);
 
   return (
-    <div className="h-screen flex flex-col bg-[#0e1111] overflow-hidden">
+    <div className="h-screen flex flex-col bg-[#0e1111] overflow-hidden relative">
       <div className="h-16 border-b border-gray-800 bg-[#151818] flex items-center justify-between px-6 shrink-0 relative z-10 shadow-sm">
         <div className="flex items-center space-x-4">
           <a href="/" className="text-xl font-bold font-mono tracking-wider text-gray-200 hover:text-white transition-colors">PAD:{roomId}</a>
+          {connectionState !== 'connected' && (
+            <span className="rounded-full border border-amber-500/30 bg-amber-500/10 px-3 py-1 text-[11px] font-medium uppercase tracking-[0.2em] text-amber-300">
+              Reconnecting
+            </span>
+          )}
           {activeTyping.length > 0 && (
             <span className="text-xs text-blue-400 italic animate-pulse">
               {activeTyping.join(', ')} is typing...
@@ -365,6 +386,9 @@ export default function Pad() {
           className="w-full h-full bg-transparent text-gray-200 text-lg leading-relaxed outline-none resize-none placeholder-gray-600 font-sans custom-scrollbar disabled:opacity-50"
           placeholder="Start typing..."
         />
+      </div>
+      <div className="fixed bottom-4 left-1/2 -translate-x-1/2 text-[11px] tracking-[0.24em] uppercase text-gray-600/90 pointer-events-none">
+        Developed by Faizal Imam
       </div>
     </div>
   );
