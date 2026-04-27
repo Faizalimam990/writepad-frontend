@@ -23,7 +23,6 @@ const USER_COLORS = [
 ];
 const NAME_ADJECTIVES = ['Neon', 'Cyber', 'Shadow', 'Ghost', 'Holo', 'Quantum', 'Hyper', 'Stellar'];
 const NAME_NOUNS = ['Tiger', 'Byte', 'Fox', 'Wolf', 'Lynx', 'Pulse', 'Wave', 'Core'];
-const IS_BOLTIC_SERVERLESS = SOCKET_URL.includes('serverless.boltic.app');
 
 function getClientId() {
   const existing = window.sessionStorage.getItem(CLIENT_ID_STORAGE_KEY);
@@ -64,6 +63,280 @@ function getDisplayColor() {
   return generated;
 }
 
+function deriveOperations(previousText, nextText) {
+  if (previousText === nextText) {
+    return [];
+  }
+
+  let start = 0;
+  while (
+    start < previousText.length &&
+    start < nextText.length &&
+    previousText[start] === nextText[start]
+  ) {
+    start += 1;
+  }
+
+  let previousEnd = previousText.length - 1;
+  let nextEnd = nextText.length - 1;
+  while (
+    previousEnd >= start &&
+    nextEnd >= start &&
+    previousText[previousEnd] === nextText[nextEnd]
+  ) {
+    previousEnd -= 1;
+    nextEnd -= 1;
+  }
+
+  const deletedText = previousText.slice(start, previousEnd + 1);
+  const insertedText = nextText.slice(start, nextEnd + 1);
+  const operations = [];
+
+  if (deletedText) {
+    operations.push({
+      type: 'delete',
+      position: start,
+      text: deletedText
+    });
+  }
+
+  if (insertedText) {
+    operations.push({
+      type: 'insert',
+      position: start,
+      text: insertedText
+    });
+  }
+
+  return operations;
+}
+
+function applyOperationToText(currentText, operation) {
+  if (!operation) return currentText;
+
+  if (operation.type === 'insert') {
+    return (
+      currentText.slice(0, operation.position) +
+      operation.text +
+      currentText.slice(operation.position)
+    );
+  }
+
+  if (operation.type === 'delete') {
+    if (currentText.slice(operation.position, operation.position + operation.text.length) !== operation.text) {
+      return null;
+    }
+    return (
+      currentText.slice(0, operation.position) +
+      currentText.slice(operation.position + operation.text.length)
+    );
+  }
+
+  return null;
+}
+
+function applyOperationsToText(currentText, operations) {
+  let nextText = currentText;
+
+  for (const operation of operations) {
+    nextText = applyOperationToText(nextText, operation);
+    if (nextText == null) {
+      return null;
+    }
+  }
+
+  return nextText;
+}
+
+function adjustSelectionForOperation(selectionStart, selectionEnd, operation) {
+  let nextStart = selectionStart;
+  let nextEnd = selectionEnd;
+
+  if (operation.type === 'insert') {
+    const delta = operation.text.length;
+    if (operation.position <= nextStart) nextStart += delta;
+    if (operation.position <= nextEnd) nextEnd += delta;
+    return { start: nextStart, end: nextEnd };
+  }
+
+  const deleteLength = operation.text.length;
+  const deleteEnd = operation.position + deleteLength;
+
+  if (operation.position < nextStart) {
+    nextStart -= Math.min(deleteEnd - operation.position, nextStart - operation.position, deleteLength);
+  }
+  if (operation.position < nextEnd) {
+    nextEnd -= Math.min(deleteEnd - operation.position, nextEnd - operation.position, deleteLength);
+  }
+
+  nextStart = Math.max(operation.position, nextStart);
+  nextEnd = Math.max(operation.position, nextEnd);
+  return { start: nextStart, end: nextEnd };
+}
+
+function cloneOperation(operation) {
+  return {
+    type: operation.type,
+    position: operation.position,
+    text: operation.text
+  };
+}
+
+function transformInsertAgainstInsert(operation, applied, preferIncoming) {
+  const transformed = cloneOperation(operation);
+  if (
+    applied.position < transformed.position ||
+    (!preferIncoming && applied.position === transformed.position)
+  ) {
+    transformed.position += applied.text.length;
+  }
+  return [transformed];
+}
+
+function transformInsertAgainstDelete(operation, applied) {
+  const transformed = cloneOperation(operation);
+  const deleteStart = applied.position;
+  const deleteEnd = deleteStart + applied.text.length;
+
+  if (transformed.position <= deleteStart) {
+    return [transformed];
+  }
+  if (transformed.position >= deleteEnd) {
+    transformed.position -= applied.text.length;
+    return [transformed];
+  }
+
+  transformed.position = deleteStart;
+  return [transformed];
+}
+
+function transformDeleteAgainstInsert(operation, applied, allowSplit) {
+  const insertPosition = applied.position;
+  const insertLength = applied.text.length;
+  const deleteStart = operation.position;
+  const deleteEnd = deleteStart + operation.text.length;
+
+  if (insertPosition <= deleteStart) {
+    const transformed = cloneOperation(operation);
+    transformed.position += insertLength;
+    return [transformed];
+  }
+
+  if (insertPosition >= deleteEnd) {
+    return [cloneOperation(operation)];
+  }
+
+  if (!allowSplit) {
+    return null;
+  }
+
+  const splitIndex = insertPosition - deleteStart;
+  const beforeText = operation.text.slice(0, splitIndex);
+  const afterText = operation.text.slice(splitIndex);
+  const transformed = [];
+
+  if (afterText) {
+    transformed.push({
+      type: 'delete',
+      position: insertPosition + insertLength,
+      text: afterText
+    });
+  }
+  if (beforeText) {
+    transformed.push({
+      type: 'delete',
+      position: deleteStart,
+      text: beforeText
+    });
+  }
+
+  return transformed;
+}
+
+function transformDeleteAgainstDelete(operation, applied, allowNoop) {
+  const deleteStart = operation.position;
+  const deleteText = operation.text;
+  const deleteEnd = deleteStart + deleteText.length;
+
+  const appliedStart = applied.position;
+  const appliedLength = applied.text.length;
+  const appliedEnd = appliedStart + appliedLength;
+
+  const beforeRemoved = Math.max(0, Math.min(appliedLength, deleteStart - appliedStart));
+  const newPosition = deleteStart - beforeRemoved;
+
+  const overlapStart = Math.max(deleteStart, appliedStart);
+  const overlapEnd = Math.min(deleteEnd, appliedEnd);
+
+  let newText = deleteText;
+  if (overlapStart < overlapEnd) {
+    const prefixLength = overlapStart - deleteStart;
+    const suffixStart = overlapEnd - deleteStart;
+    newText = deleteText.slice(0, prefixLength) + deleteText.slice(suffixStart);
+  }
+
+  if (!newText) {
+    return allowNoop ? [] : null;
+  }
+
+  return [{
+    type: 'delete',
+    position: newPosition,
+    text: newText
+  }];
+}
+
+function transformOperationAgainst(operation, applied, { allowSplit = false, allowNoop = false, preferIncoming = false } = {}) {
+  if (operation.type === 'insert' && applied.type === 'insert') {
+    return transformInsertAgainstInsert(operation, applied, preferIncoming);
+  }
+  if (operation.type === 'insert' && applied.type === 'delete') {
+    return transformInsertAgainstDelete(operation, applied);
+  }
+  if (operation.type === 'delete' && applied.type === 'insert') {
+    return transformDeleteAgainstInsert(operation, applied, allowSplit);
+  }
+  if (operation.type === 'delete' && applied.type === 'delete') {
+    return transformDeleteAgainstDelete(operation, applied, allowNoop);
+  }
+  return null;
+}
+
+function transformOperationsAgainstHistory(operations, history, options) {
+  let transformedOperations = operations.map(cloneOperation);
+
+  for (const applied of history) {
+    const nextOperations = [];
+    for (const operation of transformedOperations) {
+      const transformed = transformOperationAgainst(operation, applied, options);
+      if (transformed == null) {
+        return null;
+      }
+      nextOperations.push(...transformed);
+    }
+    transformedOperations = nextOperations;
+  }
+
+  return transformedOperations;
+}
+
+function rebaseQueuedOperationsAgainstRemote(queuedOperations, remoteOperation) {
+  const rebasedOperations = [];
+
+  for (const operation of queuedOperations) {
+    const transformed = transformOperationAgainst(operation, remoteOperation, {
+      allowSplit: false,
+      allowNoop: false
+    });
+    if (transformed == null || transformed.length !== 1) {
+      return null;
+    }
+    rebasedOperations.push(transformed[0]);
+  }
+
+  return rebasedOperations;
+}
+
 export default function Pad() {
   const { id: roomId } = useParams();
   const navigate = useNavigate();
@@ -83,10 +356,33 @@ export default function Pad() {
   const [shouldConnect, setShouldConnect] = useState(false);
   const usersRef = useRef({});
   const hasShownReconnectToastRef = useRef(false);
+  const textareaRef = useRef(null);
+  const serverContentRef = useRef('');
+  const contentRef = useRef('');
+  const versionRef = useRef(0);
+  const queuedOperationsRef = useRef([]);
+  const inflightCountRef = useRef(0);
 
   useEffect(() => {
     usersRef.current = users;
   }, [users]);
+
+  const debouncedOperationFlush = useCallback(
+    debounce(() => {
+      if (!socket?.connected || inflightCountRef.current > 0 || queuedOperationsRef.current.length === 0) {
+        return;
+      }
+
+      const operations = queuedOperationsRef.current.slice();
+      inflightCountRef.current = operations.length;
+      socket.emit('text_operations', {
+        room_id: roomId,
+        operations,
+        base_version: versionRef.current
+      });
+    }, 75),
+    [roomId]
+  );
 
   useEffect(() => {
     const initPad = async () => {
@@ -119,8 +415,8 @@ export default function Pad() {
 
     socket = io(SOCKET_URL, {
       path: '/socket.io',
-      transports: IS_BOLTIC_SERVERLESS ? ['polling'] : ['polling', 'websocket'],
-      upgrade: !IS_BOLTIC_SERVERLESS,
+      transports: ['polling', 'websocket'],
+      upgrade: true,
       reconnection: true,
       reconnectionAttempts: Infinity,
       reconnectionDelay: 1000,
@@ -157,7 +453,12 @@ export default function Pad() {
       }
     });
 
-    socket.on('init_state', ({ content, users, my_sid }) => {
+    socket.on('init_state', ({ content, version, users, my_sid }) => {
+      serverContentRef.current = content;
+      contentRef.current = content;
+      versionRef.current = version || 0;
+      queuedOperationsRef.current = [];
+      inflightCountRef.current = 0;
       setContent(content);
       setUsers(users);
       setMySid(my_sid);
@@ -186,8 +487,95 @@ export default function Pad() {
       });
     });
 
-    socket.on('text_updated', ({ content: newContent }) => {
-      setContent(newContent);
+    socket.on('operations_applied', ({ version, client_applied_count, applied_operations }) => {
+      const nextServerContent = applyOperationsToText(serverContentRef.current, applied_operations || []);
+      if (nextServerContent == null) {
+        socket.emit('sync_request', { room_id: roomId });
+        return;
+      }
+
+      serverContentRef.current = nextServerContent;
+      versionRef.current = version;
+      queuedOperationsRef.current = queuedOperationsRef.current.slice(client_applied_count);
+      inflightCountRef.current = 0;
+
+      const nextRenderedContent = applyOperationsToText(
+        serverContentRef.current,
+        queuedOperationsRef.current
+      );
+      if (nextRenderedContent == null) {
+        socket.emit('sync_request', { room_id: roomId });
+        return;
+      }
+
+      contentRef.current = nextRenderedContent;
+      setContent(nextRenderedContent);
+      if (queuedOperationsRef.current.length > 0) {
+        debouncedOperationFlush();
+      }
+    });
+
+    socket.on('operation_applied', ({ operation, version }) => {
+      const queuedOperations = queuedOperationsRef.current.slice();
+      const transformedRemoteOperations = transformOperationsAgainstHistory(
+        [operation],
+        queuedOperations,
+        { allowSplit: true, allowNoop: true, preferIncoming: true }
+      );
+      const rebasedQueuedOperations = rebaseQueuedOperationsAgainstRemote(queuedOperations, operation);
+
+      if (transformedRemoteOperations == null || rebasedQueuedOperations == null) {
+        socket.emit('sync_request', { room_id: roomId });
+        return;
+      }
+
+      const nextServerContent = applyOperationToText(serverContentRef.current, operation);
+      if (nextServerContent == null) {
+        socket.emit('sync_request', { room_id: roomId });
+        return;
+      }
+
+      const textarea = textareaRef.current;
+      const isFocused = textarea && document.activeElement === textarea;
+      let selection = isFocused
+        ? { start: textarea.selectionStart, end: textarea.selectionEnd }
+        : null;
+
+      for (const transformedOperation of transformedRemoteOperations) {
+        if (selection) {
+          selection = adjustSelectionForOperation(selection.start, selection.end, transformedOperation);
+        }
+      }
+
+      const nextRenderedContent = applyOperationsToText(nextServerContent, rebasedQueuedOperations);
+      if (nextRenderedContent == null) {
+        socket.emit('sync_request', { room_id: roomId });
+        return;
+      }
+
+      serverContentRef.current = nextServerContent;
+      queuedOperationsRef.current = rebasedQueuedOperations;
+      contentRef.current = nextRenderedContent;
+      versionRef.current = version;
+      setContent(nextRenderedContent);
+
+      if (selection && textarea) {
+        requestAnimationFrame(() => {
+          textarea.setSelectionRange(selection.start, selection.end);
+        });
+      }
+    });
+
+    socket.on('full_sync', ({ content: syncedContent, version, reason }) => {
+      serverContentRef.current = syncedContent;
+      contentRef.current = syncedContent;
+      versionRef.current = version;
+      queuedOperationsRef.current = [];
+      inflightCountRef.current = 0;
+      setContent(syncedContent);
+      if (reason === 'version_mismatch' || reason === 'operation_conflict') {
+        toast('Document resynced to keep everyone in sync.', { icon: '🛠️', duration: 2200 });
+      }
     });
 
     socket.on('user_typing', ({ sid }) => {
@@ -215,10 +603,11 @@ export default function Pad() {
 
     return () => {
       window.removeEventListener('pagehide', handlePageLeave);
+      debouncedOperationFlush.cancel();
       handlePageLeave();
       if (socket) socket.disconnect();
     };
-  }, [clientId, displayColor, displayName, roomId, navigate, shouldConnect]);
+  }, [clientId, debouncedOperationFlush, displayColor, displayName, roomId, navigate, shouldConnect]);
 
   useEffect(() => {
     const interval = setInterval(() => {
@@ -245,18 +634,20 @@ export default function Pad() {
     [roomId]
   );
 
-  const debouncedTextUpdate = useCallback(
-    debounce((newContent) => {
-      if (socket) socket.emit('text_update', { room_id: roomId, content: newContent });
-    }, 300),
-    [roomId]
-  );
-
   const handleChange = (e) => {
     const val = e.target.value;
+    const operations = deriveOperations(contentRef.current, val);
+    if (operations.length === 0) {
+      setContent(val);
+      contentRef.current = val;
+      return;
+    }
+
+    queuedOperationsRef.current = [...queuedOperationsRef.current, ...operations];
+    contentRef.current = val;
     setContent(val);
     debouncedTyping();
-    debouncedTextUpdate(val);
+    debouncedOperationFlush();
   };
 
   const copyLink = () => {
@@ -330,7 +721,7 @@ export default function Pad() {
     );
   }
 
-  const activeTyping = Object.keys(typingUsers).filter(sid => sid !== mySid).map(sid => users[sid]?.name);
+  const activeTyping = Object.keys(typingUsers).filter(sid => sid !== mySid).map(sid => users[sid]?.name).filter(Boolean);
 
   return (
     <div className="h-screen flex flex-col bg-[#0e1111] overflow-hidden relative">
@@ -381,6 +772,7 @@ export default function Pad() {
 
       <div className="flex-1 w-full max-w-5xl self-center p-6 py-8 md:p-12 overflow-hidden flex">
         <textarea
+          ref={textareaRef}
           value={content}
           onChange={handleChange}
           autoFocus
