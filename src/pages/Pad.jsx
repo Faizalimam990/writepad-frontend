@@ -5,12 +5,70 @@ import { Copy, CheckCircle2, AlertTriangle, Download } from 'lucide-react';
 import debounce from 'lodash.debounce';
 import toast from 'react-hot-toast';
 import { API_BASE_URL, SOCKET_URL } from '../lib/config';
+import { useRef } from 'react';
 
 let socket;
+const CLIENT_ID_STORAGE_KEY = 'rustpad_client_id';
+const DISPLAY_NAME_STORAGE_KEY = 'rustpad_display_name';
+const DISPLAY_COLOR_STORAGE_KEY = 'rustpad_display_color';
+const USER_COLORS = [
+  '#ef4444',
+  '#3b82f6',
+  '#10b981',
+  '#f59e0b',
+  '#8b5cf6',
+  '#ec4899',
+  '#06b6d4',
+  '#84cc16'
+];
+const NAME_ADJECTIVES = ['Neon', 'Cyber', 'Shadow', 'Ghost', 'Holo', 'Quantum', 'Hyper', 'Stellar'];
+const NAME_NOUNS = ['Tiger', 'Byte', 'Fox', 'Wolf', 'Lynx', 'Pulse', 'Wave', 'Core'];
+
+function getClientId() {
+  const existing = window.sessionStorage.getItem(CLIENT_ID_STORAGE_KEY);
+  if (existing) {
+    return existing;
+  }
+
+  const generated =
+    window.crypto?.randomUUID?.() ||
+    `client-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  window.sessionStorage.setItem(CLIENT_ID_STORAGE_KEY, generated);
+  return generated;
+}
+
+function getRandomItem(items) {
+  return items[Math.floor(Math.random() * items.length)];
+}
+
+function getDisplayName() {
+  const existing = window.sessionStorage.getItem(DISPLAY_NAME_STORAGE_KEY);
+  if (existing) {
+    return existing;
+  }
+
+  const generated = `${getRandomItem(NAME_ADJECTIVES)}${getRandomItem(NAME_NOUNS)}`;
+  window.sessionStorage.setItem(DISPLAY_NAME_STORAGE_KEY, generated);
+  return generated;
+}
+
+function getDisplayColor() {
+  const existing = window.sessionStorage.getItem(DISPLAY_COLOR_STORAGE_KEY);
+  if (existing) {
+    return existing;
+  }
+
+  const generated = getRandomItem(USER_COLORS);
+  window.sessionStorage.setItem(DISPLAY_COLOR_STORAGE_KEY, generated);
+  return generated;
+}
 
 export default function Pad() {
   const { id: roomId } = useParams();
   const navigate = useNavigate();
+  const [clientId] = useState(() => getClientId());
+  const [displayName] = useState(() => getDisplayName());
+  const [displayColor] = useState(() => getDisplayColor());
   
   const [content, setContent] = useState('');
   const [users, setUsers] = useState({});
@@ -21,6 +79,11 @@ export default function Pad() {
   const [requirePin, setRequirePin] = useState(false);
   const [pinInput, setPinInput] = useState('');
   const [shouldConnect, setShouldConnect] = useState(false);
+  const usersRef = useRef({});
+
+  useEffect(() => {
+    usersRef.current = users;
+  }, [users]);
 
   useEffect(() => {
     const initPad = async () => {
@@ -51,10 +114,32 @@ export default function Pad() {
   useEffect(() => {
     if (!shouldConnect) return;
 
-    socket = io(SOCKET_URL);
+    socket = io(SOCKET_URL, {
+      path: '/socket.io',
+      transports: ['websocket', 'polling'],
+      reconnection: true,
+      reconnectionAttempts: 5,
+      timeout: 20000
+    });
 
     socket.on('connect', () => {
-      socket.emit('join_pad', { room_id: roomId });
+      socket.emit('join_pad', {
+        room_id: roomId,
+        client_id: clientId,
+        name: displayName,
+        color: displayColor
+      });
+    });
+
+    socket.on('connect_error', () => {
+      setError('Realtime connection failed. Please refresh and try again.');
+      toast.error('Realtime connection failed.');
+    });
+
+    socket.on('disconnect', (reason) => {
+      if (reason !== 'io client disconnect') {
+        toast.error('Connection lost.');
+      }
     });
 
     socket.on('init_state', ({ content, users, my_sid }) => {
@@ -69,9 +154,13 @@ export default function Pad() {
     });
 
     socket.on('user_left', ({ sid }) => {
+      const leavingUser = usersRef.current[sid];
+      if (leavingUser) {
+        toast(`${leavingUser.name} left the chat`, { icon: '🚪', duration: 2500 });
+      }
+
       setUsers(prev => {
         const next = { ...prev };
-        if (next[sid]) toast(`${next[sid].name} left`, { icon: '🚪', duration: 2000 });
         delete next[sid];
         return next;
       });
@@ -98,10 +187,20 @@ export default function Pad() {
       }
     });
 
+    const handlePageLeave = () => {
+      if (socket?.connected) {
+        socket.emit('leave_pad', { room_id: roomId });
+      }
+    };
+
+    window.addEventListener('pagehide', handlePageLeave);
+
     return () => {
+      window.removeEventListener('pagehide', handlePageLeave);
+      handlePageLeave();
       if (socket) socket.disconnect();
     };
-  }, [roomId, navigate, shouldConnect]);
+  }, [clientId, displayColor, displayName, roomId, navigate, shouldConnect]);
 
   useEffect(() => {
     const interval = setInterval(() => {
